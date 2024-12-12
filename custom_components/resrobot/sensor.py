@@ -24,13 +24,16 @@ from datetime import datetime
 
 _LOGGER = logging.getLogger(__name__)
 _ENDPOINT = 'https://api.resrobot.se/v2.1/departureBoard?format=json'
+_ENDPOINT_ARRIVALS = 'https://api.resrobot.se/v2.1/arrivalBoard?format=json'
 
 DEFAULT_NAME            = 'ResRobot'
 DEFAULT_INTERVAL        = 1
 DEFAULT_VERIFY_SSL      = True
 DEFAULT_SSL_CIPHER_LIST = SSLCipherList.PYTHON_DEFAULT
 CONF_DEPARTURES         = 'departures'
+CONF_ARRIVALS           = 'arrivals'
 CONF_MAX_JOURNEYS       = 'max_journeys'
+CONF_DURATION           = 'duration'
 CONF_SENSORS            = 'sensors'
 CONF_STOP_ID            = 'stop_id'
 CONF_UPDATE_NAME        = 'update_name'
@@ -56,6 +59,24 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
         vol.Optional(CONF_UNIT): cv.string,
         vol.Optional(CONF_TIME_OFFSET): cv.positive_int,
         vol.Optional(CONF_MAX_JOURNEYS, default=20): cv.positive_int,
+        vol.Optional(CONF_DURATION, default=480): cv.positive_int,
+        vol.Optional(CONF_FILTER, default=[]): [{
+            vol.Optional(CONF_MEANS_OF_TRANSPORT): cv.string,
+            vol.Optional(CONF_FILTER_LINE): cv.string,
+            vol.Optional(CONF_FILTER_TYPE, default="must"): cv.string,
+            vol.Optional(CONF_FILTER_DIRECTION): cv.string,
+        }],
+        vol.Optional(CONF_TIME_FORMAT, default="%H:%M:%S"): cv.string,
+    }],
+    vol.Optional(CONF_ARRIVALS): [{
+        vol.Optional(CONF_SENSORS, default=3): cv.positive_int,
+        vol.Required(CONF_STOP_ID): cv.positive_int,
+        vol.Optional(CONF_NAME): cv.string,
+        vol.Optional(CONF_UPDATE_NAME): cv.boolean,
+        vol.Optional(CONF_UNIT): cv.string,
+        vol.Optional(CONF_TIME_OFFSET): cv.positive_int,
+        vol.Optional(CONF_MAX_JOURNEYS, default=20): cv.positive_int,
+        vol.Optional(CONF_DURATION, default=480): cv.positive_int,
         vol.Optional(CONF_FILTER, default=[]): [{
             vol.Optional(CONF_MEANS_OF_TRANSPORT): cv.string,
             vol.Optional(CONF_FILTER_LINE): cv.string,
@@ -70,6 +91,7 @@ SCAN_INTERVAL = timedelta(minutes=DEFAULT_INTERVAL)
 async def async_setup_platform(hass, config, async_add_devices, discovery_info=None):
     sensors        = []
     departures     = config.get(CONF_DEPARTURES)
+    arrivals       = config.get(CONF_ARRIVALS)
     api_key        = config.get(CONF_KEY)
     fetch_interval = config.get(CONF_FETCH_INTERVAL) if config.get(CONF_FETCH_INTERVAL) else 10
 
@@ -78,6 +100,7 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
             hass,
             config,
             async_add_devices,
+            _ENDPOINT,
             api_key,
             fetch_interval,
             departure.get(CONF_SENSORS),
@@ -86,15 +109,38 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
             departure.get(CONF_UPDATE_NAME),
             departure.get(CONF_STOP_ID),
             departure.get(CONF_MAX_JOURNEYS),
+            departure.get(CONF_DURATION),
             departure.get(CONF_TIME_OFFSET),
             departure.get(CONF_FILTER),
             departure.get(CONF_TIME_FORMAT),
             discovery_info
         )
 
-async def add_sensors(hass, config, async_add_devices, api_key, fetch_interval,
+    if arrivals is not None:
+        for arrival in arrivals:
+            await add_sensors(
+                hass,
+                config,
+                async_add_devices,
+                _ENDPOINT_ARRIVALS,
+                api_key,
+                fetch_interval,
+                arrival.get(CONF_SENSORS),
+                arrival.get(CONF_UNIT),
+                arrival.get(CONF_NAME),
+                arrival.get(CONF_UPDATE_NAME),
+                arrival.get(CONF_STOP_ID),
+                arrival.get(CONF_MAX_JOURNEYS),
+                arrival.get(CONF_DURATION),
+                arrival.get(CONF_TIME_OFFSET),
+                arrival.get(CONF_FILTER),
+                arrival.get(CONF_TIME_FORMAT),
+                discovery_info
+            )
+
+async def add_sensors(hass, config, async_add_devices, endpoint, api_key, fetch_interval,
                       number_of_sensors, unit_of_measurement, name, update_name,
-                      location, max_journeys, time_offset, filter, time_format,
+                      location, max_journeys, duration, time_offset, filter, time_format,
                       discovery_info=None):
     method         = 'GET'
     payload        = ''
@@ -106,7 +152,7 @@ async def add_sensors(hass, config, async_add_devices, api_key, fetch_interval,
     params         = {}
     timeout        = 5000
     time           = None
-    resource       = _ENDPOINT + '&accessId='+ api_key + '&id=' + str(location) + '&maxJourneys='+ str(max_journeys) + '&duration=480'
+    resource       = endpoint + '&accessId='+ api_key + '&id=' + str(location) + '&maxJourneys='+ str(max_journeys) + '&duration=' + str(duration)
     sensors        = []
     helpers        = []
     helper         = 'helper_'+name
@@ -231,10 +277,13 @@ class helperEntity(Entity):
                 await self._rest.async_update()
                 self._result = json.loads(self._rest.data)
 
-                if "Departure" not in self._result:
+                if "Departure" not in self._result and "Arrival" not in self._result:
                     _LOGGER.error("ResRobot found no trips")
                     return False
-                trips = self.filterResults(self._result['Departure'])
+                if "Departure" in self._result:
+                    trips = self.filterResults(self._result['Departure'])
+                if "Arrival" in self._result:
+                    trips = self.filterResults(self._result['Arrival'])
                 self._state = datetime.now()
                 self._attributes.update({"json": trips})
 
@@ -331,6 +380,7 @@ class entityRepresentation(Entity):
                 "type",
                 "stop",
                 "direction",
+                "origin",
                 "time",
                 "date",
                 "means_of_transport",
