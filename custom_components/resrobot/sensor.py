@@ -296,7 +296,7 @@ class helperEntity(Entity):
             if ("json" not in self._attributes and "failed" not in self._attributes) or self._state.timestamp()+fetch_in_seconds < datetime.now().timestamp():
                 if self._time_offset:
                     time = dateparser.parse("in " + str(self._time_offset) + " minutes")
-                    _rest.params.update({
+                    self._rest.params.update({
                         "time": time.strftime("%H:%M"),
                         "date": time.strftime('%Y-%m-%d')
                     })
