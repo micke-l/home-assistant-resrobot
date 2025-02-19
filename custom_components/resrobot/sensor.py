@@ -23,8 +23,8 @@ from dateutil import parser
 from datetime import datetime
 
 _LOGGER = logging.getLogger(__name__)
-_ENDPOINT = 'https://api.resrobot.se/v2.1/departureBoard?format=json'
-_ENDPOINT_ARRIVALS = 'https://api.resrobot.se/v2.1/arrivalBoard?format=json'
+_ENDPOINT = 'https://api.resrobot.se/v2.1/departureBoard'
+_ENDPOINT_ARRIVALS = 'https://api.resrobot.se/v2.1/arrivalBoard'
 
 DEFAULT_NAME            = 'ResRobot'
 DEFAULT_INTERVAL        = 1
@@ -32,6 +32,7 @@ DEFAULT_VERIFY_SSL      = True
 DEFAULT_SSL_CIPHER_LIST = SSLCipherList.PYTHON_DEFAULT
 CONF_DEPARTURES         = 'departures'
 CONF_ARRIVALS           = 'arrivals'
+CONF_DEBUG_MODE         = 'debug_mode'
 CONF_MAX_JOURNEYS       = 'max_journeys'
 CONF_DURATION           = 'duration'
 CONF_SENSORS            = 'sensors'
@@ -50,6 +51,7 @@ CONF_TIME_FORMAT        = 'time_format'
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Required(CONF_KEY, default=0): cv.string,
+    vol.Optional(CONF_DEBUG_MODE, default=False): cv.boolean,
     vol.Optional(CONF_FETCH_INTERVAL): cv.positive_int,
     vol.Required(CONF_DEPARTURES): [{
         vol.Optional(CONF_SENSORS, default=3): cv.positive_int,
@@ -93,6 +95,7 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
     departures     = config.get(CONF_DEPARTURES)
     arrivals       = config.get(CONF_ARRIVALS)
     api_key        = config.get(CONF_KEY)
+    debug_mode     = config.get(CONF_DEBUG_MODE)
     fetch_interval = config.get(CONF_FETCH_INTERVAL) if config.get(CONF_FETCH_INTERVAL) else 10
 
     for departure in departures:
@@ -113,7 +116,8 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
             departure.get(CONF_TIME_OFFSET),
             departure.get(CONF_FILTER),
             departure.get(CONF_TIME_FORMAT),
-            discovery_info
+            discovery_info,
+            debug_mode
         )
 
     if arrivals is not None:
@@ -135,13 +139,14 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
                 arrival.get(CONF_TIME_OFFSET),
                 arrival.get(CONF_FILTER),
                 arrival.get(CONF_TIME_FORMAT),
-                discovery_info
+                discovery_info,
+                debug_mode
             )
 
 async def add_sensors(hass, config, async_add_devices, endpoint, api_key, fetch_interval,
                       number_of_sensors, unit_of_measurement, name, update_name,
                       location, max_journeys, duration, time_offset, filter, time_format,
-                      discovery_info=None):
+                      discovery_info=None, debug_mode=False):
     method         = 'GET'
     payload        = ''
     auth           = None
@@ -149,20 +154,40 @@ async def add_sensors(hass, config, async_add_devices, endpoint, api_key, fetch_
     verify_ssl     = DEFAULT_VERIFY_SSL
     ssl_cipher_list = DEFAULT_SSL_CIPHER_LIST
     headers        = {}
-    params         = {}
+    params         = {
+        "format": "json",
+        "accessId": api_key,
+        "id": str(location),
+        "max_journeys": str(max_journeys),
+        "duration": str(duration)
+    }
     timeout        = 5000
     time           = None
-    resource       = endpoint + '&accessId='+ api_key + '&id=' + str(location) + '&maxJourneys='+ str(max_journeys) + '&duration=' + str(duration)
+    resource       = endpoint
     sensors        = []
     helpers        = []
     helper         = 'helper_'+name
-    base_resource  = resource
 
     if time_offset:
         time     = dateparser.parse("in " + str(time_offset) + " minutes")
-        resource = resource + '&time='+ time.strftime("%H:%M") + '&date=' + time.strftime('%Y-%m-%d')
-    rest = RestData(hass, method, resource, encoding, auth, headers, params, payload, verify_ssl, ssl_cipher_list, timeout)
-    helpers.append(helperEntity(rest, helper, fetch_interval, time_offset, base_resource, filter))
+        params.update({
+            "time": time.strftime("%H:%M"),
+            "date": time.strftime('%Y-%m-%d')
+        })
+    rest = RestData(
+        hass,
+        method,
+        resource,
+        encoding,
+        auth,
+        headers,
+        params,
+        payload,
+        verify_ssl,
+        ssl_cipher_list,
+        timeout
+    )
+    helpers.append(helperEntity(rest, helper, fetch_interval, time_offset, filter, debug_mode))
     async_add_devices(helpers, True)
 
     for i in range(0, number_of_sensors):
@@ -176,7 +201,7 @@ async def add_sensors(hass, config, async_add_devices, endpoint, api_key, fetch_
     async_add_devices(sensors, True)
 
 class helperEntity(Entity):
-    def __init__(self, rest, name, fetch_interval, time_offset, base_resource, filter):
+    def __init__(self, rest, name, fetch_interval, time_offset, filter, debug_mode):
         """Initialize a sensor."""
         self._rest        = rest
         self._name        = name
@@ -185,8 +210,8 @@ class helperEntity(Entity):
         self._state       = datetime.now()
         self._interval    = int(fetch_interval)
         self._time_offset = time_offset
-        self._base_url    = base_resource
         self._attributes  = {}
+        self.debug_mode   = debug_mode
 
     @property
     def name(self):
@@ -268,17 +293,24 @@ class helperEntity(Entity):
         """Get the latest data from the API."""
         try:
             fetch_in_seconds = self._interval*60
-            if "json" not in self._attributes or self._state.timestamp()+fetch_in_seconds < datetime.now().timestamp():
+            if ("json" not in self._attributes and "failed" not in self._attributes) or self._state.timestamp()+fetch_in_seconds < datetime.now().timestamp():
                 if self._time_offset:
                     time = dateparser.parse("in " + str(self._time_offset) + " minutes")
-                    url  = self._base_url + '&time='+ time.strftime("%H:%M") + '&date=' + time.strftime('%Y-%m-%d')
-                    self._rest.set_url(url)
+                    _rest.params.update({
+                        "time": time.strftime("%H:%M"),
+                        "date": time.strftime('%Y-%m-%d')
+                    })
 
                 await self._rest.async_update()
+                if self.debug_mode:
+                    _LOGGER.warn("ResRobot Update")
+                    _LOGGER.warn(self._rest.data)
                 self._result = json.loads(self._rest.data)
 
                 if "Departure" not in self._result and "Arrival" not in self._result:
                     _LOGGER.error("ResRobot found no trips")
+                    self._state = datetime.now()
+                    self._attributes.update({"failed": True})
                     return False
                 if "Departure" in self._result:
                     trips = self.filterResults(self._result['Departure'])
